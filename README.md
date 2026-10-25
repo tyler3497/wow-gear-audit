@@ -4,6 +4,13 @@ Quickly view the equipped gear of everyone in your party or raid, with
 an overall item-level view, a click-through detail view per player, and
 an audit for missing enchants and gems.
 
+Built for retail **Midnight 12.1.5 (Interface 120105)**. It uses the
+modern `C_Item` / `C_ClassColor` / `C_TooltipInfo` APIs — the old
+globals `GetItemInfo` and `GetItemQualityColor` were removed in
+Midnight and are never called unguarded. The UI is a modern dark
+theme: flat panels, thin borders, an accent bar, item icons bordered
+in quality colour, and mouse-wheel scrolling.
+
 ## Install
 
 1. Copy the `GearAudit` folder into your WoW addons folder:

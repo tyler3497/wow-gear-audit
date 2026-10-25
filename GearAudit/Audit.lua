@@ -46,6 +46,80 @@ GA.ENCHANTABLE_SLOTS = {
     [17] = true,  -- Off Hand (weapon / shield only, checked below)
 }
 
+-- Safe item-info lookup for modern retail.
+-- The old global GetItemInfo() was removed in Midnight (12.x):
+-- calling it is "attempt to call a nil value". The replacement
+-- is C_Item.GetItemInfo(), which returns the same fields in
+-- the same order. Use this helper everywhere instead of
+-- calling either one directly, so a missing API can never
+-- crash the audit -- it just returns nil.
+function GA.GetItemInfo(link)
+    local unpackFn = unpack or table.unpack
+    if C_Item and C_Item.GetItemInfo then
+        local results = { pcall(C_Item.GetItemInfo, link) }
+        if results[1] then
+            return unpackFn(results, 2)
+        end
+        return nil
+    end
+    if GetItemInfo then
+        return GetItemInfo(link)
+    end
+    return nil
+end
+
+-- Quality colour for Midnight: the old global
+-- GetItemQualityColor() became C_Item.GetItemQualityColor().
+-- Returns r, g, b in 0-1, or white if nothing is available.
+function GA.GetItemQualityColor(quality)
+    if quality == nil then return 1, 1, 1 end
+    if C_Item and C_Item.GetItemQualityColor then
+        local ok, r, g, b = pcall(C_Item.GetItemQualityColor, quality)
+        if ok then
+            -- Some builds return a colour object instead of numbers.
+            if type(r) == "table" and r.GetRGB then
+                return r:GetRGB()
+            end
+            if type(r) == "number" then
+                return r, g or 1, b or 1
+            end
+        end
+    end
+    if GetItemQualityColor then
+        local ok, r, g, b = pcall(GetItemQualityColor, quality)
+        if ok and type(r) == "number" then
+            return r, g, b
+        end
+    end
+    if ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[quality] then
+        local c = ITEM_QUALITY_COLORS[quality]
+        if c.GetRGB then return c:GetRGB() end
+        if type(c.r) == "number" then return c.r, c.g, c.b end
+    end
+    return 1, 1, 1
+end
+
+-- Class colour for Midnight: prefer C_ClassColor, fall back
+-- to the classic RAID_CLASS_COLORS table, then white.
+function GA.GetClassColor(classFile)
+    if classFile and C_ClassColor and C_ClassColor.GetClassColor then
+        local ok, color = pcall(C_ClassColor.GetClassColor, classFile)
+        if ok and color then
+            if color.GetRGB then
+                local r, g, b = color:GetRGB()
+                return { r = r, g = g, b = b }
+            end
+            if type(color.r) == "number" then
+                return { r = color.r, g = color.g, b = color.b }
+            end
+        end
+    end
+    if classFile and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile] then
+        return RAID_CLASS_COLORS[classFile]
+    end
+    return { r = 1, g = 1, b = 1 }
+end
+
 -- An item link looks like:
 --   |cffa335ee|Hitem:12345:6789:111:222:0:0:0:0:0:0:0|h[Name]|h|r
 -- Field 1 is the item ID, field 2 is the enchant ID, and the
@@ -54,7 +128,16 @@ function GA.ParseItemLink(link)
     if not link then return nil end
     local itemString = link:match("item:([^|]+)")
     if not itemString then return nil end
-    local parts = { strsplit(":", itemString) }
+    local parts
+    if strsplit then
+        parts = { strsplit(":", itemString) }
+    else
+        -- Fallback if strsplit ever disappears: plain split.
+        parts = {}
+        for part in (itemString .. ":"):gmatch("([^:]*):") do
+            parts[#parts + 1] = part
+        end
+    end
     local function numAt(i)
         return tonumber(parts[i]) or 0
     end
@@ -114,6 +197,12 @@ end
 --   link, itemLevel, hasEnchant, enchantMissing, gemsFilled,
 --   sockets, gemsMissing
 function GA.AuditSlot(unit, slotId)
+    -- GetInventoryItemLink is still present in Midnight, but
+    -- never call it unguarded: a missing API must give an
+    -- empty slot, not a Lua error for the whole refresh.
+    if not GetInventoryItemLink then
+        return { empty = true }
+    end
     local link = GetInventoryItemLink(unit, slotId)
     if not link then
         return { empty = true }
@@ -121,9 +210,9 @@ function GA.AuditSlot(unit, slotId)
     local parsed = GA.ParseItemLink(link)
     local itemLevel = 0
     -- Modern retail exposes this as C_Item.GetDetailedItemLevelInfo;
-    -- keep the old global as a fallback. GetItemInfo's level below
-    -- is only the base level, so it is a last resort, not a
-    -- substitute for the upgraded level.
+    -- keep the old global as a fallback. The base level from
+    -- GetItemInfo below is only a last resort, not a substitute
+    -- for the upgraded level.
     if C_Item and C_Item.GetDetailedItemLevelInfo then
         local ok, lvl = pcall(C_Item.GetDetailedItemLevelInfo, link)
         if ok then itemLevel = lvl or 0 end
@@ -131,14 +220,18 @@ function GA.AuditSlot(unit, slotId)
     if itemLevel == 0 and GetDetailedItemLevelInfo then
         itemLevel = GetDetailedItemLevelInfo(link) or 0
     end
+    -- One item-info call, reused for level, quality, icon and
+    -- the off-hand weapon/shield check below.
+    local _, _, quality, baseLevel, _, _, itemSubType, _, _, icon, _, classID, subclassID = GA.GetItemInfo(link)
     if itemLevel == 0 then
-        local _, _, _, lvl = GetItemInfo(link)
-        itemLevel = lvl or 0
+        itemLevel = baseLevel or 0
     end
 
     local result = {
         link = link,
         itemLevel = itemLevel,
+        quality = quality,
+        icon = icon,
         hasEnchant = parsed and parsed.enchantId ~= 0,
         gemsFilled = parsed and #parsed.gems or 0,
         sockets = 0,
@@ -151,14 +244,22 @@ function GA.AuditSlot(unit, slotId)
     if GA.ENCHANTABLE_SLOTS[slotId] then
         local isWeaponOrShield = true
         if slotId == 17 then
-            local _, _, _, _, _, _, itemSubType = GetItemInfo(link)
-            isWeaponOrShield = (itemSubType == "Shields")
-                or (itemSubType == "One-Handed Axes" or itemSubType == "One-Handed Swords"
-                or itemSubType == "One-Handed Maces" or itemSubType == "Daggers"
-                or itemSubType == "Fist Weapons" or itemSubType == "Warglaives")
-            -- Main-hand style weapons in the off hand are also
-            -- enchantable; if the subtype is unknown, do not flag.
-            if itemSubType == nil then isWeaponOrShield = false end
+            -- Use numeric class/subclass IDs, not English subtype
+            -- names, so this works in any client locale.
+            -- classID 2 = Weapon, classID 4 + subclassID 6 = Shield.
+            -- itemSubType / classID / subclassID come from the
+            -- single GA.GetItemInfo call above.
+            if classID ~= nil then
+                isWeaponOrShield = (classID == 2) or (classID == 4 and subclassID == 6)
+            elseif itemSubType ~= nil then
+                isWeaponOrShield = (itemSubType == "Shields")
+                    or (itemSubType == "One-Handed Axes" or itemSubType == "One-Handed Swords"
+                    or itemSubType == "One-Handed Maces" or itemSubType == "Daggers"
+                    or itemSubType == "Fist Weapons" or itemSubType == "Warglaives")
+            else
+                -- Subtype unknown (item not cached yet): do not flag.
+                isWeaponOrShield = false
+            end
         end
         if isWeaponOrShield and not result.hasEnchant then
             result.enchantMissing = true
@@ -184,7 +285,13 @@ function GA.AuditUnit(unit)
     local totalLevel, counted = 0, 0
     local missingEnchants, missingGems = {}, 0
     for _, slot in ipairs(GA.SLOTS) do
-        local audit = GA.AuditSlot(unit, slot.id)
+        -- One bad slot must never kill the whole refresh:
+        -- if a future API change breaks a slot, that slot
+        -- shows as empty and the rest still audit.
+        local ok, audit = pcall(GA.AuditSlot, unit, slot.id)
+        if not ok then
+            audit = { empty = true }
+        end
         audit.slotId = slot.id
         audit.slotName = slot.name
         gear[slot.id] = audit

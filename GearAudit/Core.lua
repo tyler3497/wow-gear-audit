@@ -12,13 +12,17 @@ GA.inspectDeadline = 0
 
 local function GetGroupUnits()
     local units = {}
-    if IsInRaid() then
-        for i = 1, GetNumGroupMembers() do
+    local numMembers = 0
+    if GetNumGroupMembers then
+        numMembers = GetNumGroupMembers() or 0
+    end
+    if IsInRaid and IsInRaid() then
+        for i = 1, numMembers do
             units[#units + 1] = "raid" .. i
         end
-    elseif IsInGroup() then
+    elseif IsInGroup and IsInGroup() then
         units[#units + 1] = "player"
-        for i = 1, GetNumGroupMembers() - 1 do
+        for i = 1, numMembers - 1 do
             units[#units + 1] = "party" .. i
         end
     else
@@ -29,42 +33,67 @@ end
 GA.GetGroupUnits = GetGroupUnits
 
 local function UnitDisplayName(unit)
+    if not UnitName then return unit end
     local name, realm = UnitName(unit)
     if not name then return unit end
-    if realm and realm ~= "" and realm ~= GetRealmName() then
+    local myRealm = ""
+    if GetRealmName then myRealm = GetRealmName() or "" end
+    if realm and realm ~= "" and realm ~= myRealm then
         return name .. "-" .. realm
     end
     return name
 end
 GA.UnitDisplayName = UnitDisplayName
 
+-- Call a UI hook only if it exists, so Core never crashes
+-- if UI.lua failed to load or is still loading.
+local function CallHook(name, ...)
+    local fn = GA[name]
+    if type(fn) == "function" then
+        fn(...)
+    end
+end
+GA.CallHook = CallHook
+
+local function ClearInspect()
+    if ClearInspectPlayer then
+        ClearInspectPlayer()
+    end
+end
+
 -- Inspect the next unit in the queue, or finish the queue.
 local function InspectNext()
     GA.inspecting = nil
     local unit = table.remove(GA.inspectQueue, 1)
     if not unit then
-        GA.OnInspectFinished()
+        CallHook("OnInspectFinished")
         return
     end
-    if not UnitExists(unit) or not UnitIsPlayer(unit) then
+    if not UnitExists or not UnitExists(unit) or not UnitIsPlayer or not UnitIsPlayer(unit) then
         InspectNext()
         return
     end
     if unit == "player" then
         -- Your own gear needs no inspect round-trip.
         GA.data[unit] = GA.AuditUnit(unit)
-        GA.OnUnitAudited(unit)
+        CallHook("OnUnitAudited", unit)
         InspectNext()
         return
     end
     if CanInspect and not CanInspect(unit) then
         GA.data[unit] = { notInspectable = true, reason = "Out of range" }
-        GA.OnUnitAudited(unit)
+        CallHook("OnUnitAudited", unit)
+        InspectNext()
+        return
+    end
+    if not NotifyInspect then
+        GA.data[unit] = { notInspectable = true, reason = "Inspect API unavailable" }
+        CallHook("OnUnitAudited", unit)
         InspectNext()
         return
     end
     GA.inspecting = unit
-    GA.inspectDeadline = GetTime() + 5
+    GA.inspectDeadline = (GetTime and GetTime() or 0) + 5
     NotifyInspect(unit)
     -- INSPECT_READY (or the timeout in the OnUpdate handler)
     -- advances the queue.
@@ -76,16 +105,16 @@ function GA.RefreshAll()
     GA.inspecting = nil
     local units = GetGroupUnits()
     for _, unit in ipairs(units) do
-        if UnitExists(unit) and UnitIsPlayer(unit) then
+        if UnitExists and UnitExists(unit) and UnitIsPlayer and UnitIsPlayer(unit) then
             GA.inspectQueue[#GA.inspectQueue + 1] = unit
         end
     end
-    GA.OnRefreshStarted(#GA.inspectQueue)
+    CallHook("OnRefreshStarted", #GA.inspectQueue)
     InspectNext()
 end
 
 function GA.RefreshUnit(unit)
-    if not UnitExists(unit) then return end
+    if not UnitExists or not UnitExists(unit) then return end
     GA.inspectQueue = { unit }
     GA.inspecting = nil
     InspectNext()
@@ -99,10 +128,10 @@ events:RegisterEvent("INSPECT_READY")
 
 events:SetScript("OnEvent", function(_, event, guid)
     if event == "INSPECT_READY" then
-        if GA.inspecting and UnitGUID(GA.inspecting) == guid then
+        if GA.inspecting and UnitGUID and UnitGUID(GA.inspecting) == guid then
             GA.data[GA.inspecting] = GA.AuditUnit(GA.inspecting)
-            GA.OnUnitAudited(GA.inspecting)
-            ClearInspectPlayer()
+            CallHook("OnUnitAudited", GA.inspecting)
+            ClearInspect()
             InspectNext()
         end
     elseif event == "GROUP_ROSTER_UPDATE" then
@@ -110,24 +139,26 @@ events:SetScript("OnEvent", function(_, event, guid)
         -- the group, drop the rest, and redraw the list.
         local stillHere = {}
         for _, unit in ipairs(GetGroupUnits()) do
-            stillHere[UnitGUID(unit) or unit] = true
+            local guidForUnit = (UnitGUID and UnitGUID(unit)) or unit
+            stillHere[guidForUnit] = true
         end
         for unit, _ in pairs(GA.data) do
-            if UnitExists(unit) and not stillHere[UnitGUID(unit) or unit] then
+            local guidForUnit = (UnitGUID and UnitExists and UnitExists(unit) and UnitGUID(unit)) or unit
+            if UnitExists and UnitExists(unit) and not stillHere[guidForUnit] then
                 GA.data[unit] = nil
             end
         end
-        GA.OnRosterChanged()
+        CallHook("OnRosterChanged")
     end
 end)
 
 events:SetScript("OnUpdate", function()
-    if GA.inspecting and GetTime() > GA.inspectDeadline then
+    if GA.inspecting and GetTime and GetTime() > GA.inspectDeadline then
         -- Inspect timed out (target moved out of range, left,
         -- or the server never answered). Do not stall the queue.
         GA.data[GA.inspecting] = { notInspectable = true, reason = "Inspect timed out" }
-        GA.OnUnitAudited(GA.inspecting)
-        ClearInspectPlayer()
+        CallHook("OnUnitAudited", GA.inspecting)
+        ClearInspect()
         InspectNext()
     end
 end)
@@ -136,7 +167,12 @@ SLASH_GEARAUDIT1 = "/gearaudit"
 SLASH_GEARAUDIT2 = "/ga"
 SLASH_GEARAUDIT3 = "/gear"
 SlashCmdList["GEARAUDIT"] = function(msg)
-    msg = strtrim((msg or ""):lower())
+    msg = (msg or ""):lower()
+    if strtrim then
+        msg = strtrim(msg)
+    else
+        msg = msg:gsub("^%s+", ""):gsub("%s+$", "")
+    end
     if msg == "refresh" then
         GA.ToggleWindow(true)
         GA.RefreshAll()
