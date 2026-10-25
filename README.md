@@ -30,11 +30,17 @@ in quality colour, and mouse-wheel scrolling.
   raid takes a few seconds. Your own gear needs no inspect.
 - The overview is sorted by average item level, highest first, and
   shows per player:
+  - **Player** — name, coloured by class
+  - **Class / Spec** — e.g. Demon Hunter • Havoc
+  - **Role** — Tank, Healer, or DPS (from the player's spec)
   - **iLvl** — average equipped item level
-  - **Ench** — `OK`, or how many enchants are missing
+  - **Enchants** — `OK`, or how many enchants are missing
   - **Gems** — `OK`, or how many gems are missing
-- **Click a player** to open the detail panel: every slot, its item
-  level, and its enchant/gem status. Hover an item for its tooltip.
+- **Click a player** to open the detail panel: the player's class,
+  spec, and role, a large average item level at the top, and every
+  slot with its item level, its upgrade track (e.g. Champion 4/6,
+  Hero 5/6, Myth 6/6 — `—` for non-upgradeable gear), and its
+  enchant/gem status. Hover an item for its tooltip.
   Shift-click an item to drop its link into chat.
 - **Re-inspect Player** re-checks just the selected player.
 

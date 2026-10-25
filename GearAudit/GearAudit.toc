@@ -3,7 +3,7 @@
 ## Title: Gear Audit
 ## Notes: Quickly view party and raid gear, item level, and missing enchants or gems.
 ## Author: Tyler
-## Version: 1.1.0
+## Version: 1.2.0
 ## SavedVariables: GearAuditDB
 
 Audit.lua

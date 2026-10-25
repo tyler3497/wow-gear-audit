@@ -154,43 +154,131 @@ function GA.ParseItemLink(link)
     }
 end
 
--- Best-effort socket count for one equipped slot.
--- Retail tooltip data marks gem sockets explicitly. If that
--- API is not available (or returns nothing), return nil so
--- callers do not flag a missing gem they cannot prove.
-function GA.CountSockets(unit, slotId)
-    if C_TooltipInfo and C_TooltipInfo.GetInventoryItem then
-        local ok, data = pcall(C_TooltipInfo.GetInventoryItem, unit, slotId)
-        if ok and data and data.lines then
-            local total, filled = 0, 0
-            for _, line in ipairs(data.lines) do
-                -- TooltipDataLineType.GemSocket == 7 in retail, but
-                -- compare by name when the enum is available so
-                -- this survives an enum renumber.
-                local isSocket = false
-                if Enum and Enum.TooltipDataLineType and Enum.TooltipDataLineType.GemSocket then
-                    isSocket = (line.type == Enum.TooltipDataLineType.GemSocket)
-                end
-                if not isSocket and line.gemSocket then
-                    isSocket = true
-                end
-                if isSocket then
-                    total = total + 1
-                    -- A filled socket line carries gem info; an
-                    -- empty one does not. Never guess from the
-                    -- line text, or empty sockets get miscounted.
-                    if line.gem ~= nil then
-                        filled = filled + 1
-                    end
-                end
+-- Tooltip data for one equipped slot, read once and reused
+-- for both gem sockets and the upgrade track. Returns a table
+-- or nil if tooltip data is unavailable.
+--   sockets, filledSockets, upgradeTrack, upgradeLevel, upgradeMax
+-- Upgrade track comes from the tooltip line itself, e.g.
+-- "Upgrade Level: Champion 4/6". That is the only reliable
+-- source: there is no direct upgrade-track API, and the
+-- track name in-game is Hero / Myth (not Heroic / Mythic).
+-- If no such line exists the item is not upgradeable and
+-- upgradeTrack stays nil, never guessed.
+function GA.GetTooltipData(unit, slotId)
+    if not (C_TooltipInfo and C_TooltipInfo.GetInventoryItem) then
+        return nil
+    end
+    local ok, data = pcall(C_TooltipInfo.GetInventoryItem, unit, slotId)
+    if not ok or not data or not data.lines then
+        return nil
+    end
+    local total, filled = 0, 0
+    local track, level, maxLevel = nil, nil, nil
+    for _, line in ipairs(data.lines) do
+        local isSocket = false
+        if Enum and Enum.TooltipDataLineType and Enum.TooltipDataLineType.GemSocket then
+            isSocket = (line.type == Enum.TooltipDataLineType.GemSocket)
+        end
+        if not isSocket and line.gemSocket then
+            isSocket = true
+        end
+        if isSocket then
+            total = total + 1
+            if line.gem ~= nil then
+                filled = filled + 1
             end
-            if total > 0 then
-                return total, filled
+        end
+        local text = line.leftText or line.rightText or ""
+        if type(text) == "string" and text ~= "" then
+            local t, l, m = text:match("Upgrade Level:%s*(%a+)%s+(%d+)/(%d+)")
+            if t and l and m then
+                track, level, maxLevel = t, tonumber(l), tonumber(m)
             end
-            return 0, 0
         end
     end
-    return nil, nil
+    return {
+        sockets = total,
+        filledSockets = filled,
+        upgradeTrack = track,
+        upgradeLevel = level,
+        upgradeMax = maxLevel,
+    }
+end
+
+-- Backwards-compatible wrapper: socket count only.
+function GA.CountSockets(unit, slotId)
+    local data = GA.GetTooltipData(unit, slotId)
+    if not data then return nil, nil end
+    return data.sockets, data.filledSockets
+end
+
+-- Class / spec / role for a unit.
+-- Player: GetSpecialization() + GetSpecializationInfo().
+-- Inspected units: GetInspectSpecialization() (only valid
+-- after INSPECT_READY, which is exactly when AuditUnit runs)
+-- + GetSpecializationInfoByID(). Every call is guarded, so a
+-- missing or renamed API gives "unknown" instead of an error.
+-- Returns: classFile, className, specName, specID, role, roleLabel
+function GA.GetSpecRole(unit)
+    local className, classFile = nil, nil
+    if UnitClass then
+        className, classFile = UnitClass(unit)
+    end
+    local specID, specName, role = nil, nil, nil
+    if unit == "player" then
+        if GetSpecialization and GetSpecializationInfo then
+            local ok, index = pcall(GetSpecialization)
+            if ok and index then
+                local ok2, id, name, _, _, _, r = pcall(GetSpecializationInfo, index)
+                if ok2 and id then
+                    specID, specName, role = id, name, r
+                end
+            end
+        end
+        if not specID and C_SpecializationInfo and C_SpecializationInfo.GetSpecializationInfo then
+            local ok, info = pcall(C_SpecializationInfo.GetSpecializationInfo, GetSpecialization and GetSpecialization() or 1)
+            if ok and type(info) == "table" then
+                specID, specName, role = info.id or info.specID, info.name, info.role
+            end
+        end
+    else
+        if GetInspectSpecialization then
+            local ok, id = pcall(GetInspectSpecialization, unit)
+            if ok and id and id ~= 0 then
+                specID = id
+            end
+        end
+        if specID then
+            if GetSpecializationInfoByID then
+                local ok, _, name, _, _, _, r = pcall(GetSpecializationInfoByID, specID)
+                if ok and name then
+                    specName, role = name, r
+                end
+            end
+            if not role and GetSpecializationRoleByID then
+                local ok, r = pcall(GetSpecializationRoleByID, specID)
+                if ok then role = r end
+            end
+            if not specName and C_SpecializationInfo and C_SpecializationInfo.GetSpecializationInfoByID then
+                local ok, info = pcall(C_SpecializationInfo.GetSpecializationInfoByID, specID)
+                if ok and type(info) == "table" then
+                    specName, role = info.name, info.role
+                end
+            end
+        end
+    end
+    local roleLabel = nil
+    if role == "TANK" then roleLabel = "Tank"
+    elseif role == "HEALER" then roleLabel = "Healer"
+    elseif role == "DAMAGER" then roleLabel = "DPS" end
+    return {
+        classFile = classFile,
+        className = className,
+        specID = specID,
+        specName = specName,
+        role = role,
+        roleLabel = roleLabel,
+    }
 end
 
 -- Audit one equipped slot. Returns a table with:
@@ -266,15 +354,21 @@ function GA.AuditSlot(unit, slotId)
         end
     end
 
-    local totalSockets, filledSockets = GA.CountSockets(unit, slotId)
-    if totalSockets ~= nil then
-        result.sockets = totalSockets
+    local tooltip = GA.GetTooltipData(unit, slotId)
+    if tooltip then
+        result.sockets = tooltip.sockets
         -- Prefer the tooltip's filled count when available;
         -- otherwise fall back to the gem IDs in the link.
-        if filledSockets ~= nil and filledSockets > 0 then
-            result.gemsFilled = filledSockets
+        if tooltip.filledSockets ~= nil and tooltip.filledSockets > 0 then
+            result.gemsFilled = tooltip.filledSockets
         end
-        result.gemsMissing = math.max(0, totalSockets - result.gemsFilled)
+        result.gemsMissing = math.max(0, tooltip.sockets - result.gemsFilled)
+        result.upgradeTrack = tooltip.upgradeTrack
+        result.upgradeLevel = tooltip.upgradeLevel
+        result.upgradeMax = tooltip.upgradeMax
+        if tooltip.upgradeTrack and tooltip.upgradeLevel and tooltip.upgradeMax then
+            result.upgradeText = tooltip.upgradeTrack .. " " .. tooltip.upgradeLevel .. "/" .. tooltip.upgradeMax
+        end
     end
     return result
 end
@@ -308,6 +402,9 @@ function GA.AuditUnit(unit)
     if counted > 0 then
         avgLevel = totalLevel / counted
     end
+    local spec = nil
+    local okSpec, specResult = pcall(GA.GetSpecRole, unit)
+    if okSpec then spec = specResult end
     return {
         gear = gear,
         avgLevel = avgLevel,
@@ -315,5 +412,6 @@ function GA.AuditUnit(unit)
         missingEnchants = missingEnchants,
         missingEnchantCount = #missingEnchants,
         missingGemCount = missingGems,
+        spec = spec,
     }
 end
