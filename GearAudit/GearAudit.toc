@@ -1,0 +1,11 @@
+## Interface: 110200
+## Interface-Mainline: 110200
+## Title: Gear Audit
+## Notes: Quickly view party and raid gear, item level, and missing enchants or gems.
+## Author: Tyler
+## Version: 1.0.0
+## SavedVariables: GearAuditDB
+
+Audit.lua
+Core.lua
+UI.lua
