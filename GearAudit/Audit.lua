@@ -219,26 +219,48 @@ end
 -- + GetSpecializationInfoByID(). Every call is guarded, so a
 -- missing or renamed API gives "unknown" instead of an error.
 -- Returns: classFile, className, specName, specID, role, roleLabel
+-- Extract spec info from a GetSpecializationInfo-style call.
+-- Returns are id, name, description, icon, then role -- but
+-- the role's position moved between client versions (it was
+-- 6th with a background texture, later 5th), which is exactly
+-- why Vengeance showed a blank role in v1.2.0. So scan every
+-- return after the icon for a TANK/HEALER/DAMAGER token
+-- instead of trusting a fixed position.
+local function ExtractSpec(ok, ...)
+    if not ok then return nil end
+    local args = { ... }
+    local id, name, icon = args[1], args[2], args[4]
+    local role = nil
+    for i = 5, #args do
+        if args[i] == "TANK" or args[i] == "HEALER" or args[i] == "DAMAGER" then
+            role = args[i]
+            break
+        end
+    end
+    if not id and not name then return nil end
+    return { id = id, name = name, icon = icon, role = role }
+end
+
 function GA.GetSpecRole(unit)
     local className, classFile = nil, nil
     if UnitClass then
         className, classFile = UnitClass(unit)
     end
-    local specID, specName, role = nil, nil, nil
+    local specID, specName, specIcon, role = nil, nil, nil, nil
     if unit == "player" then
         if GetSpecialization and GetSpecializationInfo then
             local ok, index = pcall(GetSpecialization)
             if ok and index then
-                local ok2, id, name, _, _, _, r = pcall(GetSpecializationInfo, index)
-                if ok2 and id then
-                    specID, specName, role = id, name, r
+                local info = ExtractSpec(pcall(GetSpecializationInfo, index))
+                if info then
+                    specID, specName, specIcon, role = info.id, info.name, info.icon, info.role
                 end
             end
         end
         if not specID and C_SpecializationInfo and C_SpecializationInfo.GetSpecializationInfo then
             local ok, info = pcall(C_SpecializationInfo.GetSpecializationInfo, GetSpecialization and GetSpecialization() or 1)
             if ok and type(info) == "table" then
-                specID, specName, role = info.id or info.specID, info.name, info.role
+                specID, specName, specIcon, role = info.id or info.specID, info.name, info.icon, info.role
             end
         end
     else
@@ -250,9 +272,9 @@ function GA.GetSpecRole(unit)
         end
         if specID then
             if GetSpecializationInfoByID then
-                local ok, _, name, _, _, _, r = pcall(GetSpecializationInfoByID, specID)
-                if ok and name then
-                    specName, role = name, r
+                local info = ExtractSpec(pcall(GetSpecializationInfoByID, specID))
+                if info then
+                    specName, specIcon, role = info.name, info.icon, info.role
                 end
             end
             if not role and GetSpecializationRoleByID then
@@ -262,7 +284,7 @@ function GA.GetSpecRole(unit)
             if not specName and C_SpecializationInfo and C_SpecializationInfo.GetSpecializationInfoByID then
                 local ok, info = pcall(C_SpecializationInfo.GetSpecializationInfoByID, specID)
                 if ok and type(info) == "table" then
-                    specName, role = info.name, info.role
+                    specName, specIcon, role = info.name, info.icon, info.role
                 end
             end
         end
@@ -276,6 +298,7 @@ function GA.GetSpecRole(unit)
         className = className,
         specID = specID,
         specName = specName,
+        specIcon = specIcon,
         role = role,
         roleLabel = roleLabel,
     }

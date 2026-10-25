@@ -31,7 +31,9 @@ in quality colour, and mouse-wheel scrolling.
 - The overview is sorted by average item level, highest first, and
   shows per player:
   - **Player** — name, coloured by class
-  - **Class / Spec** — e.g. Demon Hunter • Havoc
+  - **Class / Spec** — the spec icon (hover it for the written
+    "Class • Spec • Role"; the written name is used if no icon
+    is available)
   - **Role** — Tank, Healer, or DPS (from the player's spec)
   - **iLvl** — average equipped item level
   - **Enchants** — `OK`, or how many enchants are missing

@@ -65,7 +65,7 @@ local function CreateModernFrame(name, width, height)
     return frame
 end
 
-local function CreateFlatButton(parent, text, width, height, accent, fontTemplate)
+local function CreateFlatButton(parent, text, width, height, accent, fontTemplate, fontSize)
     local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
     btn:SetSize(width, height)
     if accent then
@@ -76,6 +76,12 @@ local function CreateFlatButton(parent, text, width, height, accent, fontTemplat
     local label = btn:CreateFontString(nil, "OVERLAY", fontTemplate or "GameFontNormalSmall")
     label:SetAllPoints(btn)
     label:SetText(text)
+    if fontSize then
+        -- Explicit size, not a template: the "×" glyph in the
+        -- normal font renders tiny, and a template alone did
+        -- not fix it in v1.2.0. A plain "X" at 22pt is unmissable.
+        label:SetFont("Fonts\\FRIZQT__.TTF", fontSize, "OUTLINE")
+    end
     label:SetTextColor(COL_TEXT[1], COL_TEXT[2], COL_TEXT[3])
     btn:SetScript("OnEnter", function(self)
         self:SetBackdropColor(COL_HOVER[1], COL_HOVER[2], COL_HOVER[3], 1)
@@ -94,8 +100,7 @@ local function CreateFlatButton(parent, text, width, height, accent, fontTemplat
 end
 
 local function CreateCloseButton(parent)
-    -- Large font on purpose: the previous Small-font X looked tiny.
-    local btn = CreateFlatButton(parent, "×", 30, 30, false, "GameFontNormalLarge")
+    local btn = CreateFlatButton(parent, "X", 32, 32, false, "GameFontNormalLarge", 22)
     btn:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -10, -10)
     return btn
 end
@@ -142,6 +147,10 @@ end
 -- ------------------------------------------------------------------
 local main = CreateModernFrame("GearAuditFrame", 640, 600)
 main:SetPoint("CENTER")
+main:SetFrameStrata("MEDIUM")
+-- Main stays in the normal layer. The detail panel (below) is
+-- in DIALOG, so when the two overlap the detail always covers
+-- the main completely instead of their elements interleaving.
 
 local title = main:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 title:SetPoint("TOPLEFT", main, "TOPLEFT", 16, -16)
@@ -173,21 +182,26 @@ hint:SetText("Click a player for full gear.")
 hint:SetTextColor(COL_DIM[1], COL_DIM[2], COL_DIM[3])
 
 -- Per-column headers, at exactly the row column X positions.
-local function MakeHeader(parent, col, text, y)
+-- baseX matters: overview rows live inside the scroll child,
+-- which is inset 16px from the main frame, so main headers
+-- need +16 or every row lands 16px right of its header --
+-- the remaining misalignment in v1.2.0. Detail rows are
+-- anchored straight to the detail frame, so baseX is 0 there.
+local function MakeHeader(parent, col, text, y, baseX)
     local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    fs:SetPoint("TOPLEFT", parent, "TOPLEFT", col.x, y)
+    fs:SetPoint("TOPLEFT", parent, "TOPLEFT", col.x + (baseX or 0), y)
     fs:SetWidth(col.w)
     fs:SetJustifyH("LEFT")
     fs:SetText(text)
     fs:SetTextColor(COL_DIM[1], COL_DIM[2], COL_DIM[3])
     return fs
 end
-MakeHeader(main, COL_PLAYER, "PLAYER", -122)
-MakeHeader(main, COL_CLASS, "CLASS / SPEC", -122)
-MakeHeader(main, COL_ROLE, "ROLE", -122)
-MakeHeader(main, COL_ILVL, "ILVL", -122)
-MakeHeader(main, COL_ENCH, "ENCHANTS", -122)
-MakeHeader(main, COL_GEM, "GEMS", -122)
+MakeHeader(main, COL_PLAYER, "PLAYER", -122, 16)
+MakeHeader(main, COL_CLASS, "CLASS / SPEC", -122, 16)
+MakeHeader(main, COL_ROLE, "ROLE", -122, 16)
+MakeHeader(main, COL_ILVL, "ILVL", -122, 16)
+MakeHeader(main, COL_ENCH, "ENCHANTS", -122, 16)
+MakeHeader(main, COL_GEM, "GEMS", -122, 16)
 
 local headerLine = main:CreateTexture(nil, "OVERLAY")
 headerLine:SetPoint("TOPLEFT", main, "TOPLEFT", 16, -136)
@@ -246,6 +260,35 @@ for i = 1, MAX_ROWS do
     row.classText:SetWidth(COL_CLASS.w)
     row.classText:SetJustifyH("LEFT")
     row.classText:SetTextColor(COL_TEXT[1], COL_TEXT[2], COL_TEXT[3])
+    -- Spec icon replaces the Class/Spec text when a spec is
+    -- known. Hovering it shows the written "Class • Spec • Role".
+    row.specIconBtn = CreateFrame("Button", nil, row)
+    row.specIconBtn:SetSize(24, 24)
+    row.specIconBtn:SetPoint("LEFT", row, "LEFT", COL_CLASS.x, 0)
+    row.specIcon = row.specIconBtn:CreateTexture(nil, "OVERLAY")
+    row.specIcon:SetAllPoints(row.specIconBtn)
+    row.specIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    row.specIconBtn:SetScript("OnEnter", function(self)
+        if self.spec and GameTooltip then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(SpecText(self.spec), 1, 1, 1)
+            if self.spec.roleLabel then
+                GameTooltip:AddLine(self.spec.roleLabel, 0.8, 0.8, 0.8)
+            end
+            GameTooltip:Show()
+        end
+    end)
+    row.specIconBtn:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    row.specIconBtn:SetScript("OnClick", function(self)
+        if self.unit then
+            GA.selectedUnit = self.unit
+            GA.RefreshOverview()
+            GA.ShowDetail(self.unit)
+        end
+    end)
+    row.specIconBtn:Hide()
     row.roleText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     row.roleText:SetPoint("LEFT", row, "LEFT", COL_ROLE.x, 0)
     row.roleText:SetWidth(COL_ROLE.w)
@@ -276,6 +319,7 @@ end
 -- ------------------------------------------------------------------
 local detail = CreateModernFrame("GearAuditDetailFrame", 640, 660)
 detail:SetPoint("LEFT", main, "RIGHT", 8, 0)
+detail:SetFrameStrata("DIALOG")
 
 local detailTitle = detail:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 detailTitle:SetPoint("TOPLEFT", detail, "TOPLEFT", 16, -16)
@@ -420,13 +464,25 @@ function GA.RefreshOverview()
             row.nameText:SetTextColor(color.r, color.g, color.b)
             local audit = GA.data[unit]
             local spec = audit and audit.spec or nil
+            row.specIconBtn.spec = spec
+            row.specIconBtn.unit = unit
             if spec then
-                row.classText:SetText(SpecText(spec))
+                if spec.specIcon then
+                    row.specIcon:SetTexture(spec.specIcon)
+                    row.specIconBtn:Show()
+                    row.classText:Hide()
+                else
+                    row.specIconBtn:Hide()
+                    row.classText:Show()
+                    row.classText:SetText(SpecText(spec))
+                end
                 local rc = RoleColor(spec.roleLabel)
                 row.roleText:SetText(spec.roleLabel or "—")
                 row.roleText:SetTextColor(rc[1], rc[2], rc[3])
             else
                 -- Class alone is still useful before a spec is known.
+                row.specIconBtn:Hide()
+                row.classText:Show()
                 local className = nil
                 if UnitClass then className = select(1, UnitClass(unit)) end
                 row.classText:SetText(className or "—")
@@ -564,6 +620,7 @@ function GA.ShowDetail(unit)
         end
     end
     detail:Show()
+    detail:Raise()
 end
 
 function GA.OnUnitAudited(unit)
