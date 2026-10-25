@@ -1,14 +1,56 @@
 -- GearAudit: Core.lua
 -- Group roster, inspect queue, and cached audit results.
--- Inspecting is throttled by the game, so players are inspected
--- one at a time and only when you press Refresh (or open the
--- window). Nothing inspects in the background on its own.
+--
+-- Why inspecting is slow on purpose (v1.4.0):
+-- A first inspect of a player often returns only 1-2 item
+-- links: the rest of their gear simply has not arrived /
+-- been cached yet when INSPECT_READY first fires. The old
+-- code audited instantly, treated every nil link as an
+-- empty slot, and published that partial audit as final --
+-- so the overview showed a bad average from 1-2 items.
+-- A single re-inspect "fixed" it only because the items
+-- were cached by then.
+-- The new flow never publishes a partial audit:
+--   * wait 0.4s after INSPECT_READY before auditing, so
+--     late-arriving gear data is in;
+--   * if fewer than 14 slots have links, re-inspect after
+--     0.8s and MERGE the new audit into the old one slot
+--     by slot (never overwrite a found slot with empty);
+--   * stop retrying when the merged audit is complete
+--     (>=14 links: 15 is a full set for a two-handed
+--     user, 16 for dual-wield/shield), when a retry adds
+--     nothing (the player genuinely has fewer items),
+--     or after 3 retries, and publish the best merged
+--     result found;
+--   * leave 0.6s between finishing one player and
+--     inspecting the next, so the server's inspect
+--     throttle does not silently drop requests.
+-- A full 5-man refresh now takes a few seconds longer,
+-- but the overview is no longer built on 1-2 items.
 local _, GA = ...
 
 GA.data = {}          -- unit -> audit summary (see Audit.lua)
 GA.inspectQueue = {}  -- units waiting to be inspected
 GA.inspecting = nil   -- unit currently being inspected
 GA.inspectDeadline = 0
+
+-- Per-inspect session state, reset on every Refresh.
+GA.inspectSession = 0
+GA.inspectAttempt = 0
+GA.inspectPending = nil
+GA.inspectPendingLinks = 0
+GA.auditScheduled = false
+
+-- A geared player has 15-16 equipped slots in GA.SLOTS
+-- (16 slots, minus an empty off-hand for two-handed users).
+-- 14 is the completeness bar: it accepts a player missing
+-- one ring/trinket, but never a 1-2 item partial audit.
+local COMPLETE_LINKS = 14
+local MAX_RETRIES = 3
+local READY_DELAY = 0.4
+local RETRY_DELAY = 0.8
+local BETWEEN_DELAY = 0.6
+local INSPECT_TIMEOUT = 8
 
 local function GetGroupUnits()
     local units = {}
@@ -45,8 +87,6 @@ local function UnitDisplayName(unit)
 end
 GA.UnitDisplayName = UnitDisplayName
 
--- Call a UI hook only if it exists, so Core never crashes
--- if UI.lua failed to load or is still loading.
 local function CallHook(name, ...)
     local fn = GA[name]
     if type(fn) == "function" then
@@ -58,6 +98,88 @@ GA.CallHook = CallHook
 local function ClearInspect()
     if ClearInspectPlayer then
         ClearInspectPlayer()
+    end
+end
+
+local function Now()
+    return (GetTime and GetTime()) or 0
+end
+
+-- Run fn after delay, unless a newer Refresh has started
+-- in the meantime (session check) or the inspect moved on.
+local function After(delay, session, unit, fn)
+    if C_Timer and C_Timer.After then
+        C_Timer.After(delay, function()
+            if session == GA.inspectSession and (unit == nil or GA.inspecting == unit) then
+                fn()
+            end
+        end)
+    else
+        fn()
+    end
+end
+
+local function RequestInspect(unit)
+    GA.inspecting = unit
+    GA.inspectDeadline = Now() + INSPECT_TIMEOUT
+    GA.auditScheduled = false
+    NotifyInspect(unit)
+end
+
+-- Publish a finished audit and move to the next unit,
+-- paced so the server throttle does not drop the next
+-- request. Queue-empty is the only finished state.
+local function FinishUnit(unit, audit)
+    if audit then
+        GA.data[unit] = audit
+        CallHook("OnUnitAudited", unit)
+    end
+    ClearInspect()
+    GA.inspecting = nil
+    GA.inspectPending = nil
+    GA.auditScheduled = false
+    if #GA.inspectQueue == 0 then
+        CallHook("OnInspectFinished")
+        return
+    end
+    local session = GA.inspectSession
+    After(BETWEEN_DELAY, session, nil, function()
+        -- After() with unit=nil skips the inspecting check
+        -- above, so re-check here: only advance if nothing
+        -- else started inspecting in the meantime.
+        if GA.inspecting == nil then
+            GA.InspectNext()
+        end
+    end)
+end
+
+-- Audit the inspected unit, merging into any partial audit
+-- already collected, and decide whether to retry.
+local function TryAudit(unit)
+    GA.auditScheduled = false
+    if GA.inspecting ~= unit then return end
+    local audit = GA.AuditUnit(unit)
+    local beforeLinks = GA.inspectPendingLinks
+    GA.inspectPending = GA.MergeAudits(GA.inspectPending, audit)
+    local links = GA.inspectPending and GA.inspectPending.linkCount or 0
+    GA.inspectPendingLinks = links
+
+    if links >= COMPLETE_LINKS then
+        FinishUnit(unit, GA.inspectPending)
+    elseif GA.inspectAttempt >= MAX_RETRIES then
+        FinishUnit(unit, GA.inspectPending)
+    elseif GA.inspectAttempt > 0 and links <= beforeLinks then
+        -- A retry added nothing: the player genuinely has
+        -- this few items. Publish the best result, do not
+        -- loop forever chasing slots that do not exist.
+        FinishUnit(unit, GA.inspectPending)
+    else
+        GA.inspectAttempt = GA.inspectAttempt + 1
+        ClearInspect()
+        local session = GA.inspectSession
+        After(RETRY_DELAY, session, unit, function()
+            RequestInspect(unit)
+        end)
     end
 end
 
@@ -92,17 +214,21 @@ local function InspectNext()
         InspectNext()
         return
     end
-    GA.inspecting = unit
-    GA.inspectDeadline = (GetTime and GetTime() or 0) + 5
-    NotifyInspect(unit)
-    -- INSPECT_READY (or the timeout in the OnUpdate handler)
-    -- advances the queue.
+    GA.inspectAttempt = 0
+    GA.inspectPending = nil
+    GA.inspectPendingLinks = 0
+    RequestInspect(unit)
+    -- INSPECT_READY (or the timeout in OnUpdate) advances
+    -- the queue, via TryAudit.
 end
 GA.InspectNext = InspectNext
 
 function GA.RefreshAll()
+    GA.inspectSession = GA.inspectSession + 1
     GA.inspectQueue = {}
     GA.inspecting = nil
+    GA.inspectPending = nil
+    GA.auditScheduled = false
     local units = GetGroupUnits()
     for _, unit in ipairs(units) do
         if UnitExists and UnitExists(unit) and UnitIsPlayer and UnitIsPlayer(unit) then
@@ -115,8 +241,11 @@ end
 
 function GA.RefreshUnit(unit)
     if not UnitExists or not UnitExists(unit) then return end
+    GA.inspectSession = GA.inspectSession + 1
     GA.inspectQueue = { unit }
     GA.inspecting = nil
+    GA.inspectPending = nil
+    GA.auditScheduled = false
     InspectNext()
 end
 
@@ -128,15 +257,18 @@ events:RegisterEvent("INSPECT_READY")
 
 events:SetScript("OnEvent", function(_, event, guid)
     if event == "INSPECT_READY" then
-        if GA.inspecting and UnitGUID and UnitGUID(GA.inspecting) == guid then
-            GA.data[GA.inspecting] = GA.AuditUnit(GA.inspecting)
-            CallHook("OnUnitAudited", GA.inspecting)
-            ClearInspect()
-            InspectNext()
+        if GA.inspecting and UnitGUID and UnitGUID(GA.inspecting) == guid and not GA.auditScheduled then
+            -- Do not audit instantly: gear data is still
+            -- arriving when this first fires. A short delay
+            -- is what turns a 1-2 item audit into a full one.
+            GA.auditScheduled = true
+            local unit = GA.inspecting
+            local session = GA.inspectSession
+            After(READY_DELAY, session, unit, function()
+                TryAudit(unit)
+            end)
         end
     elseif event == "GROUP_ROSTER_UPDATE" then
-        -- Roster changed: keep cached data for units still in
-        -- the group, drop the rest, and redraw the list.
         local stillHere = {}
         for _, unit in ipairs(GetGroupUnits()) do
             local guidForUnit = (UnitGUID and UnitGUID(unit)) or unit
@@ -153,13 +285,32 @@ events:SetScript("OnEvent", function(_, event, guid)
 end)
 
 events:SetScript("OnUpdate", function()
-    if GA.inspecting and GetTime and GetTime() > GA.inspectDeadline then
+    if GA.inspecting and GetTime and Now() > GA.inspectDeadline then
         -- Inspect timed out (target moved out of range, left,
-        -- or the server never answered). Do not stall the queue.
-        GA.data[GA.inspecting] = { notInspectable = true, reason = "Inspect timed out" }
-        CallHook("OnUnitAudited", GA.inspecting)
-        ClearInspect()
-        InspectNext()
+        -- or the server never answered, including throttle).
+        if GA.inspectAttempt < MAX_RETRIES then
+            -- One more try before giving up on this player.
+            GA.inspectAttempt = GA.inspectAttempt + 1
+            ClearInspect()
+            RequestInspect(GA.inspecting)
+        else
+            local unit = GA.inspecting
+            if GA.inspectPending and GA.inspectPending.linkCount > 0 then
+                FinishUnit(unit, GA.inspectPending)
+            else
+                GA.data[unit] = { notInspectable = true, reason = "Inspect timed out" }
+                CallHook("OnUnitAudited", unit)
+                ClearInspect()
+                GA.inspecting = nil
+                GA.inspectPending = nil
+                GA.auditScheduled = false
+                if #GA.inspectQueue == 0 then
+                    CallHook("OnInspectFinished")
+                else
+                    GA.InspectNext()
+                end
+            end
+        end
     end
 end)
 

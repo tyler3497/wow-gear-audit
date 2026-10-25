@@ -432,6 +432,72 @@ function GA.AuditUnit(unit)
         gear = gear,
         avgLevel = avgLevel,
         itemCount = counted,
+        linkCount = GA.CountLinks(gear),
+        missingEnchants = missingEnchants,
+        missingEnchantCount = #missingEnchants,
+        missingGemCount = missingGems,
+        spec = spec,
+    }
+end
+
+-- How many slots actually have an item link. This is the
+-- completeness measure: a slot with a link but an uncached
+-- item level is still a found item, while a nil link on a
+-- first inspect usually means "not loaded yet", not "empty".
+function GA.CountLinks(gear)
+    local n = 0
+    if not gear then return 0 end
+    for _, audit in pairs(gear) do
+        if audit and audit.link then n = n + 1 end
+    end
+    return n
+end
+
+-- Merge two audits of the same unit, slot by slot. A later
+-- audit never erases a slot an earlier audit found: on a
+-- partial first inspect, the retry finds different slots,
+-- and only the union is complete. Averages and missing
+-- counts are recomputed from the merged gear, never averaged
+-- across audits (that would double-count shared slots).
+function GA.MergeAudits(old, new)
+    if not old then return new end
+    if not new then return old end
+    local gear = {}
+    for _, slot in ipairs(GA.SLOTS) do
+        local newSlot = new.gear and new.gear[slot.id]
+        local oldSlot = old.gear and old.gear[slot.id]
+        if newSlot and not newSlot.empty and newSlot.link then
+            gear[slot.id] = newSlot
+        elseif oldSlot then
+            gear[slot.id] = oldSlot
+        elseif newSlot then
+            gear[slot.id] = newSlot
+        else
+            gear[slot.id] = { empty = true, slotId = slot.id, slotName = slot.name }
+        end
+        gear[slot.id].slotId = slot.id
+        gear[slot.id].slotName = slot.name
+    end
+    local totalLevel, counted, missingGems = 0, 0, 0
+    local missingEnchants = {}
+    for _, slot in ipairs(GA.SLOTS) do
+        local audit = gear[slot.id]
+        if audit and not audit.empty and audit.itemLevel and audit.itemLevel > 0 then
+            totalLevel = totalLevel + audit.itemLevel
+            counted = counted + 1
+        end
+        if audit and audit.enchantMissing then
+            missingEnchants[#missingEnchants + 1] = slot.name
+        end
+        missingGems = missingGems + (audit and audit.gemsMissing or 0)
+    end
+    local spec = old.spec
+    if new.spec and new.spec.specName then spec = new.spec end
+    return {
+        gear = gear,
+        avgLevel = counted > 0 and (totalLevel / counted) or 0,
+        itemCount = counted,
+        linkCount = GA.CountLinks(gear),
         missingEnchants = missingEnchants,
         missingEnchantCount = #missingEnchants,
         missingGemCount = missingGems,

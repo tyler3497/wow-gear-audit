@@ -28,6 +28,11 @@ in quality colour, and mouse-wheel scrolling.
 - Press **Refresh All** to inspect your party or raid. Players are
   inspected one at a time (the game throttles inspects), so a full
   raid takes a few seconds. Your own gear needs no inspect.
+  A first inspect often returns only a few items, so Refresh
+  waits briefly after each inspect, re-inspects any player
+  with fewer than 14 equipped slots, and merges the retries
+  slot by slot — a partial audit is never shown as final,
+  even if that makes the refresh a little slower.
 - The overview is sorted by average item level, highest first, and
   shows per player:
   - **Player** — name, coloured by class
