@@ -41,6 +41,12 @@ GA.inspectPending = nil
 GA.inspectPendingLinks = 0
 GA.auditScheduled = false
 
+-- Auto-scan roster tracking (v1.5.0): GUIDs seen on the last
+-- roster check. A GUID not in this set is a new joiner.
+GA.lastRoster = {}
+GA.autoScanPending = false
+GA.pendingAutoUnits = {}
+
 -- A geared player has 15-16 equipped slots in GA.SLOTS
 -- (16 slots, minus an empty off-hand for two-handed users).
 -- 14 is the completeness bar: it accepts a player missing
@@ -249,11 +255,76 @@ function GA.RefreshUnit(unit)
     InspectNext()
 end
 
+-- Queue units for inspection without interrupting a scan
+-- already in progress: new units are appended, and if
+-- nothing is inspecting right now the queue starts at once.
+-- A pacing timer already scheduled by FinishUnit is safe:
+-- its callback checks inspecting == nil before advancing,
+-- so it will not double-start a unit QueueUnits started.
+function GA.QueueUnits(units)
+    for _, unit in ipairs(units) do
+        if UnitExists and UnitExists(unit) and UnitIsPlayer and UnitIsPlayer(unit) then
+            local already = (GA.inspecting == unit)
+            if not already then
+                for _, queued in ipairs(GA.inspectQueue) do
+                    if queued == unit then already = true; break end
+                end
+            end
+            if not already then
+                GA.inspectQueue[#GA.inspectQueue + 1] = unit
+            end
+        end
+    end
+    if GA.inspecting == nil and #GA.inspectQueue > 0 then
+        InspectNext()
+    end
+end
+
+-- Auto-scan: called on roster changes and on entering the
+-- world. Only units whose GUID was not in the last roster
+-- are new, so a reshuffle or a role change does not rescan
+-- the whole group -- only genuine joiners get inspected,
+-- and their data is already cached by the time you open
+-- the window. In combat, inspecting is deferred until
+-- PLAYER_REGEN_ENABLED instead of being dropped.
+function GA.CheckRosterForNewPlayers()
+    local units = GetGroupUnits()
+    local current = {}
+    local unitByGuid = {}
+    for _, unit in ipairs(units) do
+        local guid = (UnitGUID and UnitGUID(unit)) or unit
+        current[guid] = true
+        unitByGuid[guid] = unit
+    end
+    local newUnits = {}
+    for guid, unit in pairs(unitByGuid) do
+        if not GA.lastRoster[guid] then
+            newUnits[#newUnits + 1] = unit
+        end
+    end
+    GA.lastRoster = current
+    if #newUnits == 0 then return end
+    table.sort(newUnits, function(a, b)
+        if a == "player" then return true end
+        if b == "player" then return false end
+        return a < b
+    end)
+    if UnitAffectingCombat and UnitAffectingCombat("player") then
+        GA.autoScanPending = true
+        for _, unit in ipairs(newUnits) do
+            GA.pendingAutoUnits[#GA.pendingAutoUnits + 1] = unit
+        end
+        return
+    end
+    GA.QueueUnits(newUnits)
+end
+
 -- Event frame: roster changes, inspect results, inspect timeout.
 local events = CreateFrame("Frame")
 events:RegisterEvent("PLAYER_ENTERING_WORLD")
 events:RegisterEvent("GROUP_ROSTER_UPDATE")
 events:RegisterEvent("INSPECT_READY")
+events:RegisterEvent("PLAYER_REGEN_ENABLED")
 
 events:SetScript("OnEvent", function(_, event, guid)
     if event == "INSPECT_READY" then
@@ -281,6 +352,33 @@ events:SetScript("OnEvent", function(_, event, guid)
             end
         end
         CallHook("OnRosterChanged")
+        -- Auto-scan genuine joiners (no rescan for the rest).
+        GA.CheckRosterForNewPlayers()
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Covers logging in / reloading already in a group:
+        -- the roster update that follows would catch the
+        -- same players, but this makes the first check early.
+        GA.CheckRosterForNewPlayers()
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        if GA.autoScanPending then
+            GA.autoScanPending = false
+            local units = GA.pendingAutoUnits
+            GA.pendingAutoUnits = {}
+            -- Only queue players still in the group.
+            local stillHere = {}
+            for _, unit in ipairs(GetGroupUnits()) do
+                local guid = (UnitGUID and UnitGUID(unit)) or unit
+                stillHere[guid] = true
+            end
+            local filtered = {}
+            for _, unit in ipairs(units) do
+                local guid = (UnitGUID and UnitGUID(unit)) or unit
+                if stillHere[guid] then
+                    filtered[#filtered + 1] = unit
+                end
+            end
+            GA.QueueUnits(filtered)
+        end
     end
 end)
 

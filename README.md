@@ -25,6 +25,12 @@ in quality colour, and mouse-wheel scrolling.
 ## Use
 
 - Type `/ga`, `/gear`, or `/gearaudit` to open the window.
+- Players are scanned automatically when you join a party/raid
+  and when a new player joins, so their gear is usually cached
+  by the time you open the window. Only genuine joiners are
+  scanned — a reshuffle or role change does not rescan the
+  whole group, and a join during combat is deferred until
+  combat ends.
 - Press **Refresh All** to inspect your party or raid. Players are
   inspected one at a time (the game throttles inspects), so a full
   raid takes a few seconds. Your own gear needs no inspect.
