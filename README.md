@@ -22,6 +22,16 @@ in quality colour, and mouse-wheel scrolling.
    **Load out of date AddOns** or bump the `## Interface` line in
    `GearAudit.toc` to your client's interface version.
 
+
+## Windows updater (optional)
+
+If you play on Windows, the `updater` folder in this repo has a
+small standalone app — double-click `GearAuditUpdater.bat` and it
+checks GitHub for the latest version, downloads it, backs up your
+old version, and installs the new one into your WoW AddOns folder.
+See `updater/README.md` for details. No Python or admin install
+needed; it uses the PowerShell already on Windows.
+
 ## Use
 
 - Type `/ga`, `/gear`, or `/gearaudit` to open the window.
